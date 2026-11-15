@@ -49,14 +49,11 @@ float smoothUnit(float value)
 void copySource(const Context& context)
 {
     const Rect bounds = context.output.bounds;
-    for (int y = bounds.y1; y < bounds.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, bounds.y1, bounds.y2, [&](int y) {
         for (int x = bounds.x1; x < bounds.x2; ++x) {
             context.output.pixel(x, y) = context.source.read(x, y);
         }
-    }
+    });
 }
 
 struct SortValue {
@@ -235,53 +232,56 @@ void renderPixelSort(const Context& context, const PixelSortSettings& settings)
     const int lastLine = minorLength - 1 + (slopeSign < 0 ? offsets.back() : 0);
     const double fragments = 80.0 * std::pow(std::clamp(settings.fragmentation, 0.0, 1.0), 1.35);
     const auto seed = hash(static_cast<std::uint32_t>(settings.seed) ^ 0x4f1bbcdcu);
-    std::vector<SortValue> run;
-    run.reserve(static_cast<std::size_t>(majorLength));
-    for (int intercept = firstLine; intercept <= lastLine; ++intercept) {
-        if (context.cancelled()) {
-            return;
-        }
-        const int minOffset = slopeSign > 0 ? -intercept : intercept - minorLength + 1;
-        const int maxOffset = slopeSign > 0 ? minorLength - intercept : intercept + 1;
-        const auto begin = std::lower_bound(offsets.begin(), offsets.end(), minOffset);
-        const auto end = std::lower_bound(begin, offsets.end(), maxOffset);
-        const int first = static_cast<int>(begin - offsets.begin());
-        const int count = static_cast<int>(end - begin);
-        if (count == 0) {
-            continue;
-        }
+    // Each sheared line owns its pixels, so bands of lines can be sorted at the same time.
+    parallelBands(firstLine, lastLine + 1, [&](int firstBandLine, int lastBandLine) {
+        std::vector<SortValue> run;
+        run.reserve(static_cast<std::size_t>(majorLength));
+        for (int intercept = firstBandLine; intercept < lastBandLine; ++intercept) {
+            if (context.cancelled()) {
+                return;
+            }
+            const int minOffset = slopeSign > 0 ? -intercept : intercept - minorLength + 1;
+            const int maxOffset = slopeSign > 0 ? minorLength - intercept : intercept + 1;
+            const auto begin = std::lower_bound(offsets.begin(), offsets.end(), minOffset);
+            const auto end = std::lower_bound(begin, offsets.end(), maxOffset);
+            const int first = static_cast<int>(begin - offsets.begin());
+            const int count = static_cast<int>(end - begin);
+            if (count == 0) {
+                continue;
+            }
 
-        const int minimum = std::max(2, static_cast<int>(std::ceil(count * settings.minLength / 100.0)));
-        const int maximum = settings.maxLength <= 0.0 ? count
-            : std::max(1, static_cast<int>(std::floor(count * settings.maxLength / 100.0)));
-        const float breakChance = static_cast<float>(std::min(0.95, fragments / count));
-        const Scanline line{horizontalMajor, intercept, slopeSign, offsets, context.frame};
-        int runStart = first;
-        for (int index = first; index < first + count; ++index) {
-            int x = 0, y = 0;
-            line.position(index, x, y);
-            const Pixel pixel = context.source.read(x, y);
-            const float luminance = pixel.a > 0.0f ? luma(pixel.r, pixel.g, pixel.b) / pixel.a : 0.0f;
-            const bool inside = luminance >= low && luminance <= high;
-            const bool eligible = pixel.a > 0.0f && std::isfinite(luminance) && (inside != settings.outside);
-            const float key = eligible ? sortKey(settings.key, pixel, luminance) : 0.0f;
-            const bool sortable = eligible && std::isfinite(key);
-            const bool fragment = sortable && breakChance > 0.0f
-                && randomAt(seed, index, intercept) < breakChance;
-            if (!run.empty() && (!sortable || static_cast<int>(run.size()) >= maximum || fragment)) {
-                finishRun(context, line, run, runStart, minimum, descending, mix);
-            }
-            if (sortable) {
-                if (run.empty()) {
-                    runStart = index;
+            const int minimum = std::max(2, static_cast<int>(std::ceil(count * settings.minLength / 100.0)));
+            const int maximum = settings.maxLength <= 0.0 ? count
+                : std::max(1, static_cast<int>(std::floor(count * settings.maxLength / 100.0)));
+            const float breakChance = static_cast<float>(std::min(0.95, fragments / count));
+            const Scanline line{horizontalMajor, intercept, slopeSign, offsets, context.frame};
+            int runStart = first;
+            for (int index = first; index < first + count; ++index) {
+                int x = 0, y = 0;
+                line.position(index, x, y);
+                const Pixel pixel = context.source.read(x, y);
+                const float luminance = pixel.a > 0.0f ? luma(pixel.r, pixel.g, pixel.b) / pixel.a : 0.0f;
+                const bool inside = luminance >= low && luminance <= high;
+                const bool eligible = pixel.a > 0.0f && std::isfinite(luminance) && (inside != settings.outside);
+                const float key = eligible ? sortKey(settings.key, pixel, luminance) : 0.0f;
+                const bool sortable = eligible && std::isfinite(key);
+                const bool fragment = sortable && breakChance > 0.0f
+                    && randomAt(seed, index, intercept) < breakChance;
+                if (!run.empty() && (!sortable || static_cast<int>(run.size()) >= maximum || fragment)) {
+                    finishRun(context, line, run, runStart, minimum, descending, mix);
                 }
-                run.push_back({pixel, key, index});
-            } else {
-                writeSortPixel(context, line, index, pixel, 1.0f);
+                if (sortable) {
+                    if (run.empty()) {
+                        runStart = index;
+                    }
+                    run.push_back({pixel, key, index});
+                } else {
+                    writeSortPixel(context, line, index, pixel, 1.0f);
+                }
             }
+            finishRun(context, line, run, runStart, minimum, descending, mix);
         }
-        finishRun(context, line, run, runStart, minimum, descending, mix);
-    }
+    });
 }
 
 void renderFilmEffect(const Context& context, const FilmSettings& settings)
@@ -316,10 +316,10 @@ void renderFilmEffect(const Context& context, const FilmSettings& settings)
         renderGlow(context, highlightMask);
     }
 
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    if (context.cancelled()) {
+        return;
+    }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         const int localY = y - frame.y1;
         const float v = static_cast<float>(2.0 * (localY + 0.5) / frameHeight - 1.0);
         for (int x = window.x1; x < window.x2; ++x) {
@@ -372,7 +372,7 @@ void renderFilmEffect(const Context& context, const FilmSettings& settings)
                 (green * falloff + speckle) * source.a, (blue * falloff + speckle) * source.a, source.a};
             context.output.pixel(x, y) = mix == 1.0f ? printed : blend(source, printed, mix);
         }
-    }
+    });
 }
 
 }  // namespace diamond::fx

@@ -24,7 +24,7 @@ pushd "%diamondBuildDir%" || exit /b 1
 cl.exe /nologo /std:c++17 /permissive- /W4 /utf-8 /EHsc /O2 /MT /LD ^
     /DNDEBUG /DNOMINMAX /DWIN32_LEAN_AND_MEAN ^
     /I"%diamondRoot%third_party\openfx\include" ^
-    "%diamondRoot%src\Plugin.cpp" "%diamondRoot%src\Shake.cpp" ^
+    "%diamondRoot%src\Plugin.cpp" "%diamondRoot%src\Parallel.cpp" "%diamondRoot%src\Shake.cpp" ^
     "%diamondRoot%src\EffectControls.cpp" "%diamondRoot%src\ImageIO.cpp" ^
     "%diamondRoot%src\Lighting.cpp" "%diamondRoot%src\Stylize.cpp" ^
     "%diamondRoot%src\BlurMoCurves.cpp" "%diamondRoot%src\Atmosphere.cpp" ^

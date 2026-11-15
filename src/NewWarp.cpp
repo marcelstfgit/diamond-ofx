@@ -33,10 +33,7 @@ void walk(const Context& context, float mix, bool identity, const Transform& tra
     if (width(context.source.bounds) == 0 || height(context.source.bounds) == 0) {
         return;
     }
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         for (int x = window.x1; x < window.x2; ++x) {
             if (identity || mix == 0.0f) {
                 context.output.pixel(x, y) = context.source.read(x, y);
@@ -45,7 +42,7 @@ void walk(const Context& context, float mix, bool identity, const Transform& tra
             const Pixel wet = transform(x, y);
             context.output.pixel(x, y) = mix == 1.0f ? wet : blend(context.source.read(x, y), wet, mix);
         }
-    }
+    });
 }
 
 float lensLuma(Pixel sample) {

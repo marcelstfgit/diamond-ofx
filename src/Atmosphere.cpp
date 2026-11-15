@@ -89,15 +89,12 @@ Pixel withLight(Pixel base, Color light, bool screen = false) {
 template <typename Light>
 void compositeAtmosphere(const Context& context, bool only, bool screen, const Light& light) {
     const Rect area = context.output.bounds;
-    for (int y = area.y1; y < area.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, area.y1, area.y2, [&](int y) {
         for (int x = area.x1; x < area.x2; ++x) {
             const Pixel base = only ? Pixel{} : context.source.read(x, y);
             context.output.pixel(x, y) = withLight(base, light(x, y), screen && !only);
         }
-    }
+    });
 }
 
 struct GlowEnergy {

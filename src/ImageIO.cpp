@@ -130,15 +130,12 @@ template <typename Sample>
 void decode(ImageView source, PixelFormat format, Image& decoded, const Context& context) {
     const auto* data = static_cast<const std::byte*>(source.data);
     const auto pixelBytes = static_cast<std::ptrdiff_t>(sizeof(Sample)) * format.components;
-    for (int y = source.bounds.y1; y < source.bounds.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, source.bounds.y1, source.bounds.y2, [&](int y) {
         const auto* pixel = data + (static_cast<std::ptrdiff_t>(y) - source.bounds.y1) * source.rowBytes;
         for (int x = source.bounds.x1; x < source.bounds.x2; ++x, pixel += pixelBytes) {
             decoded.pixel(x, y) = readPixel<Sample>(pixel, format);
         }
-    }
+    });
 }
 
 template <typename Sample>
@@ -147,16 +144,13 @@ void encode(MutableImageView destination, PixelFormat format, const Context& con
     const auto pixelBytes = static_cast<std::ptrdiff_t>(sizeof(Sample)) * format.components;
     const Rect window = context.output.bounds;
     const auto xOffset = (static_cast<std::ptrdiff_t>(window.x1) - destination.bounds.x1) * pixelBytes;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         auto* pixel = data + (static_cast<std::ptrdiff_t>(y) - destination.bounds.y1) * destination.rowBytes
             + xOffset;
         for (int x = window.x1; x < window.x2; ++x, pixel += pixelBytes) {
             writePixel<Sample>(pixel, format, context.output.pixel(x, y));
         }
-    }
+    });
 }
 
 void decodeImage(ImageView source, PixelFormat format, Image& decoded, const Context& context) {
@@ -194,7 +188,9 @@ void renderEffect(Kind kind, Parameters parameters, ImageView source, PixelForma
     validateView(destination.bounds, destination.rowBytes, outputFormat);
     Image decoded(checkedSourceBounds(source, inputFormat));
     Image output(window);
-    const Context context{decoded, output, frame, pixelAspect, timeFrames, fps, abort, abortContext};
+    Cancellation cancellation(abort, abortContext);
+    const Context context{decoded, output, frame, pixelAspect, timeFrames, fps,
+                          Cancellation::poll, &cancellation};
     decodeImage(source, inputFormat, decoded, context);
     if (context.cancelled()) {
         return;
@@ -209,7 +205,7 @@ void renderEffect(Kind kind, Parameters parameters, ImageView source, PixelForma
         };
         diamond::renderShake({decoded.data(), stride(decoded.bounds), decoded.bounds},
             {output.data(), stride(output.bounds), output.bounds}, frame, window, Depth::Float, 4,
-            timeFrames / fps, 1.0 / fps, pixelAspect, false, *shake, abort, abortContext);
+            timeFrames / fps, 1.0 / fps, pixelAspect, false, *shake, Cancellation::poll, &cancellation);
     } else {
         renderConfiguredEffect(kind, parameters, context);
     }
@@ -229,7 +225,9 @@ void renderTransitionEffect(TransitionKind kind, const TransitionSettings& setti
     progress = std::isfinite(progress) ? std::clamp(progress, 0.0, 1.0) : 0.0;
     Image outgoing(progress < 1.0 ? checkedSourceBounds(from, fromFormat) : Rect{});
     Image output(window);
-    const Context context{outgoing, output, frame, pixelAspect, timeFrames, fps, abort, abortContext};
+    Cancellation cancellation(abort, abortContext);
+    const Context context{outgoing, output, frame, pixelAspect, timeFrames, fps,
+                          Cancellation::poll, &cancellation};
     decodeImage(from, fromFormat, outgoing, context);
     if (context.cancelled()) {
         return;

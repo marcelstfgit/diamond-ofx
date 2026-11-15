@@ -39,14 +39,11 @@ Pixel mix(Pixel first, Pixel second, float amount)
 void copySource(const Context& context)
 {
     const Rect window = context.output.bounds;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         for (int x = window.x1; x < window.x2; ++x) {
             context.output.pixel(x, y) = context.source.read(x, y);
         }
-    }
+    });
 }
 
 std::size_t offset(int x, int y, int width)
@@ -88,23 +85,25 @@ bool blurRows(const Context& context, std::vector<Pixel>& pixels, int width, int
     }
 
     const float weight = 1.0f / (2.0f * static_cast<float>(radius) + 1.0f);
-    std::vector<Pixel> line(static_cast<std::size_t>(width));
-    for (int y = 0; y < height; ++y) {
-        if (context.cancelled()) {
-            return false;
+    parallelBands(0, height, [&](int firstRow, int lastRow) {
+        std::vector<Pixel> line(static_cast<std::size_t>(width));
+        for (int y = firstRow; y < lastRow; ++y) {
+            if (context.cancelled()) {
+                return;
+            }
+            auto* row = pixels.data() + offset(0, y, width);
+            Pixel sum = scaled(row[0], static_cast<float>(radius + 1));
+            for (int x = 1; x <= radius; ++x) {
+                add(sum, row[std::min(x, width - 1)]);
+            }
+            for (int x = 0; x < width; ++x) {
+                line[static_cast<std::size_t>(x)] = scaled(sum, weight);
+                advance(sum, row[std::min(x + radius + 1, width - 1)], row[std::max(x - radius, 0)]);
+            }
+            std::copy_n(line.data(), width, row);
         }
-        auto* row = pixels.data() + offset(0, y, width);
-        Pixel sum = scaled(row[0], static_cast<float>(radius + 1));
-        for (int x = 1; x <= radius; ++x) {
-            add(sum, row[std::min(x, width - 1)]);
-        }
-        for (int x = 0; x < width; ++x) {
-            line[static_cast<std::size_t>(x)] = scaled(sum, weight);
-            advance(sum, row[std::min(x + radius + 1, width - 1)], row[std::max(x - radius, 0)]);
-        }
-        std::copy_n(line.data(), width, row);
-    }
-    return true;
+    });
+    return !context.cancelled();
 }
 
 bool blurColumns(const Context& context, std::vector<Pixel>& pixels, int width, int height, int radius)
@@ -116,36 +115,40 @@ bool blurColumns(const Context& context, std::vector<Pixel>& pixels, int width, 
     // Keep several neighboring columns together so the vertical pass reads contiguous pixels.
     constexpr int columns = 32;
     const float weight = 1.0f / (2.0f * static_cast<float>(radius) + 1.0f);
-    std::vector<Pixel> stripe(offset(0, height, columns));
-    for (int left = 0; left < width; left += columns) {
-        if (context.cancelled()) {
-            return false;
-        }
-        const int count = std::min(columns, width - left);
-        Pixel sums[columns]{};
-        for (int i = 0; i < count; ++i) {
-            sums[i] = scaled(pixels[offset(left + i, 0, width)], static_cast<float>(radius + 1));
-        }
-        for (int y = 1; y <= radius; ++y) {
-            const auto* row = pixels.data() + offset(left, std::min(y, height - 1), width);
+    // A stripe reads and writes only its own columns, so stripes can run side by side.
+    parallelBands(0, (width + columns - 1) / columns, [&](int firstStripe, int lastStripe) {
+        std::vector<Pixel> stripe(offset(0, height, columns));
+        for (int index = firstStripe; index < lastStripe; ++index) {
+            if (context.cancelled()) {
+                return;
+            }
+            const int left = index * columns;
+            const int count = std::min(columns, width - left);
+            Pixel sums[columns]{};
             for (int i = 0; i < count; ++i) {
-                add(sums[i], row[i]);
+                sums[i] = scaled(pixels[offset(left + i, 0, width)], static_cast<float>(radius + 1));
+            }
+            for (int y = 1; y <= radius; ++y) {
+                const auto* row = pixels.data() + offset(left, std::min(y, height - 1), width);
+                for (int i = 0; i < count; ++i) {
+                    add(sums[i], row[i]);
+                }
+            }
+            for (int y = 0; y < height; ++y) {
+                const auto* incoming = pixels.data() + offset(left, std::min(y + radius + 1, height - 1), width);
+                const auto* outgoing = pixels.data() + offset(left, std::max(y - radius, 0), width);
+                auto* row = stripe.data() + offset(0, y, columns);
+                for (int i = 0; i < count; ++i) {
+                    row[i] = scaled(sums[i], weight);
+                    advance(sums[i], incoming[i], outgoing[i]);
+                }
+            }
+            for (int y = 0; y < height; ++y) {
+                std::copy_n(stripe.data() + offset(0, y, columns), count, pixels.data() + offset(left, y, width));
             }
         }
-        for (int y = 0; y < height; ++y) {
-            const auto* incoming = pixels.data() + offset(left, std::min(y + radius + 1, height - 1), width);
-            const auto* outgoing = pixels.data() + offset(left, std::max(y - radius, 0), width);
-            auto* row = stripe.data() + offset(0, y, columns);
-            for (int i = 0; i < count; ++i) {
-                row[i] = scaled(sums[i], weight);
-                advance(sums[i], incoming[i], outgoing[i]);
-            }
-        }
-        for (int y = 0; y < height; ++y) {
-            std::copy_n(stripe.data() + offset(0, y, columns), count, pixels.data() + offset(left, y, width));
-        }
-    }
-    return true;
+    });
+    return !context.cancelled();
 }
 
 bool soften(const Context& context, std::vector<Pixel>& light, int width, int height, int radiusX, int radiusY)
@@ -305,15 +308,12 @@ void renderGlow(const Context& context, const GlowSettings& settings)
     std::vector<Pixel> light(offset(0, height, width));
     const float threshold = static_cast<float>(settings.threshold);
     const float knee = static_cast<float>(std::max(0.0, settings.knee));
-    for (int y = area.y1; y < area.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, area.y1, area.y2, [&](int y) {
         for (int x = area.x1; x < area.x2; ++x) {
             light[offset(x - area.x1, y - area.y1, width)] = highlight(context.source.read(x, y), threshold, knee);
         }
-    }
-    if (!soften(context, light, width, height, radiusX, radiusY)) {
+    });
+    if (context.cancelled() || !soften(context, light, width, height, radiusX, radiusY)) {
         return;
     }
 
@@ -321,23 +321,17 @@ void renderGlow(const Context& context, const GlowSettings& settings)
         std::min(window.x2, frame.x2), std::min(window.y2, frame.y2)};
     const bool broad = extraX > 0 || extraY > 0;
     if (broad) {
-        for (int y = active.y1; y < active.y2; ++y) {
-            if (context.cancelled()) {
-                return;
-            }
+        forEachRow(context, active.y1, active.y2, [&](int y) {
             for (int x = active.x1; x < active.x2; ++x) {
                 context.output.pixel(x, y) = light[offset(x - area.x1, y - area.y1, width)];
             }
-        }
-        if (!soften(context, light, width, height, extraX, extraY)) {
+        });
+        if (context.cancelled() || !soften(context, light, width, height, extraX, extraY)) {
             return;
         }
     }
 
-    for (int y = active.y1; y < active.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, active.y1, active.y2, [&](int y) {
         for (int x = active.x1; x < active.x2; ++x) {
             Pixel glow = light[offset(x - area.x1, y - area.y1, width)];
             auto& target = context.output.pixel(x, y);
@@ -346,7 +340,7 @@ void renderGlow(const Context& context, const GlowSettings& settings)
             }
             target = compositeGlow(context.source.read(x, y), glow, tint, settings.blend == 1, settings.glowOnly);
         }
-    }
+    });
 }
 
 void renderDigitalDamage(const Context& context, const DamageSettings& settings)
@@ -378,10 +372,7 @@ void renderDigitalDamage(const Context& context, const DamageSettings& settings)
     const double scanPhase = random(pattern, 0, 0, 7) * scanPeriod;
     const float noiseScale = static_cast<float>(0.65 * settings.noise);
 
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         const int row = y - frame.y1;
         const int band = (row + bandHeight / 2) / bandHeight;
         const bool tearing = random(pattern, band, 0) < 0.36f;
@@ -433,7 +424,7 @@ void renderDigitalDamage(const Context& context, const DamageSettings& settings)
             damaged.b = damaged.b * gain + noise;
             context.output.pixel(x, y) = mix(original, damaged, amount);
         }
-    }
+    });
 }
 
 }  // namespace diamond::fx

@@ -38,14 +38,11 @@ Pixel mix(Pixel source, Pixel effect, float weight) {
 template <typename Render>
 void renderPixels(const Context& context, const Render& render) {
     const Rect window = context.output.bounds;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         for (int x = window.x1; x < window.x2; ++x) {
             context.output.pixel(x, y) = render(x, y, context.source.read(x, y));
         }
-    }
+    });
 }
 
 void copySource(const Context& context) {
@@ -193,33 +190,43 @@ void gaussian(const Context& context, double radius, Edge edge, const Read& read
     }
 
     const double sigma = 0.5 * radius;
-    LineFilter<Value> horizontal(columns, gaussianBox(sigma / aspect(context)));
-    LineFilter<Value> vertical(height(window), gaussianBox(sigma));
+    const FractionalBox horizontalBox = gaussianBox(sigma / aspect(context));
+    const FractionalBox verticalBox = gaussianBox(sigma);
     std::vector<Value> intermediate(static_cast<std::size_t>(columns) * sourceRows);
     const auto index = [&](int x, int y) {
         return static_cast<std::size_t>(y - source.y1) * columns + (x - window.x1);
     };
-    for (int y = source.y1; y < source.y2; ++y) {
-        if (context.cancelled()) {
-            return;
+    // A line filter holds scratch rows, so every band of lines gets its own.
+    parallelBands(source.y1, source.y2, [&](int firstRow, int lastRow) {
+        LineFilter<Value> horizontal(columns, horizontalBox);
+        for (int y = firstRow; y < lastRow; ++y) {
+            if (context.cancelled()) {
+                return;
+            }
+            horizontal.run(window.x1, [&](std::int64_t x) {
+                return mapCoordinate(x, source.x1, source.x2, edge) ? read(static_cast<int>(x), y) : Value{};
+            }, [&](int x, Value value) {
+                intermediate[index(x, y)] = value;
+            });
         }
-        horizontal.run(window.x1, [&](std::int64_t x) {
-            return mapCoordinate(x, source.x1, source.x2, edge) ? read(static_cast<int>(x), y) : Value{};
-        }, [&](int x, Value value) {
-            intermediate[index(x, y)] = value;
-        });
+    });
+    if (context.cancelled()) {
+        return;
     }
-    for (int x = window.x1; x < window.x2; ++x) {
-        if (context.cancelled()) {
-            return;
+    parallelBands(window.x1, window.x2, [&](int firstColumn, int lastColumn) {
+        LineFilter<Value> vertical(height(window), verticalBox);
+        for (int x = firstColumn; x < lastColumn; ++x) {
+            if (context.cancelled()) {
+                return;
+            }
+            vertical.run(window.y1, [&](std::int64_t y) {
+                return mapCoordinate(y, source.y1, source.y2, edge)
+                    ? intermediate[index(x, static_cast<int>(y))] : Value{};
+            }, [&](int y, Value value) {
+                context.output.pixel(x, y) = write(x, y, value);
+            });
         }
-        vertical.run(window.y1, [&](std::int64_t y) {
-            return mapCoordinate(y, source.y1, source.y2, edge)
-                ? intermediate[index(x, static_cast<int>(y))] : Value{};
-        }, [&](int y, Value value) {
-            context.output.pixel(x, y) = write(x, y, value);
-        });
-    }
+    });
 }
 
 std::uint32_t hash(std::uint32_t value) {

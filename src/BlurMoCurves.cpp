@@ -138,10 +138,7 @@ Exposure buildExposure(const Context& context, const BlurSettings& settings) {
 void renderSingle(const Context& context, const Affine& inverse, Edge edge) {
     const Rect window = context.output.bounds;
     const bool identity = sameAffine(inverse, Affine{});
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         double sampleX = inverse.xx * window.x1 + inverse.xy * y + inverse.tx;
         double sampleY = inverse.yx * window.x1 + inverse.yy * y + inverse.ty;
         for (int x = window.x1; x < window.x2; ++x) {
@@ -150,7 +147,7 @@ void renderSingle(const Context& context, const Affine& inverse, Edge edge) {
             sampleX += inverse.xx;
             sampleY += inverse.yx;
         }
-    }
+    });
 }
 
 struct ExposureGpuSample {
@@ -226,12 +223,9 @@ void renderBlurMoCurves(const Context& context, const BlurSettings& settings) {
     }
 
     const Rect window = context.output.bounds;
-    std::array<double, kMaxExposureSamples> sampleX{};
-    std::array<double, kMaxExposureSamples> sampleY{};
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
+        std::array<double, kMaxExposureSamples> sampleX{};
+        std::array<double, kMaxExposureSamples> sampleY{};
         for (int i = 0; i < exposure.count; ++i) {
             const Affine& inverse = exposure.samples[i].inverse;
             sampleX[i] = inverse.xx * window.x1 + inverse.xy * y + inverse.tx;
@@ -251,7 +245,7 @@ void renderBlurMoCurves(const Context& context, const BlurSettings& settings) {
             }
             context.output.pixel(x, y) = result;
         }
-    }
+    });
 }
 
 } // namespace diamond::fx

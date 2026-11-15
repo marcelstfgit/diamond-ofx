@@ -39,17 +39,14 @@ Pixel composite(Pixel base, Color light, int blend) {
 template <typename Light>
 void renderLight(const Context& context, bool only, Color tint, int blend, const Light& lightAt) {
     const Rect window = context.output.bounds;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         for (int x = window.x1; x < window.x2; ++x) {
             const Pixel base = only ? Pixel{} : context.source.read(x, y);
             const Color light = lightAt(x, y);
             context.output.pixel(x, y) = composite(
                 base, {tint.r * light.r, tint.g * light.g, tint.b * light.b}, only ? 0 : blend);
         }
-    }
+    });
 }
 
 Color gain(double intensity, double red, double green, double blue) {
@@ -116,10 +113,7 @@ struct Highlights {
     bool extract(const Context& context, double threshold, double knee, float peakWeight) {
         const float cutoff = static_cast<float>(threshold);
         const float softness = static_cast<float>(knee);
-        for (int gy = 0; gy < field.height(); ++gy) {
-            if (context.cancelled()) {
-                return false;
-            }
+        forEachRow(context, 0, field.height(), [&](int gy) {
             const int y0 = frame.y1 + gy * step;
             const int y1 = std::min(frame.y2, y0 + step);
             for (int gx = 0; gx < field.width(); ++gx) {
@@ -142,8 +136,8 @@ struct Highlights {
                 const int pixels = (x1 - x0) * (y1 - y0);
                 field.at(gx, gy) = peak * peakWeight + (sum / pixels) * (1 - peakWeight);
             }
-        }
-        return true;
+        });
+        return !context.cancelled();
     }
 
     double x(int px) const { return (static_cast<double>(px) - frame.x1 + 0.5) / step - 0.5; }
@@ -323,10 +317,7 @@ void renderGlare(const Context& context, const GlareSettings& settings) {
     Field red(highlights.width(), highlights.height());
     Field green(highlights.width(), highlights.height());
     Field blue(highlights.width(), highlights.height());
-    for (int y = 0; y < highlights.height(); ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, 0, highlights.height(), [&](int y) {
         for (int x = 0; x < highlights.width(); ++x) {
             const float broad = 1.24f * halo.at(x, y) + 0.38f * rays.at(x, y);
             Color light{broad, broad, broad};
@@ -342,6 +333,9 @@ void renderGlare(const Context& context, const GlareSettings& settings) {
             green.at(x, y) = shoulder(light.g);
             blue.at(x, y) = shoulder(light.b);
         }
+    });
+    if (context.cancelled()) {
+        return;
     }
     const Color tint = gain(settings.intensity, settings.red, settings.green, settings.blue);
     renderLight(context, settings.glareOnly, tint, settings.blend, [&](int x, int y) {

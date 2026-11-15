@@ -70,14 +70,11 @@ template<class Evaluate>
 void draw(const Context& context, const Evaluate& evaluate)
 {
     const Rect window = context.output.bounds;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         for (int x = window.x1; x < window.x2; ++x) {
             context.output.pixel(x, y) = evaluate(x, y, context.source.read(x, y));
         }
-    }
+    });
 }
 
 void copySource(const Context& context)
@@ -272,42 +269,44 @@ bool renderScreen(const Context& context, const Screen& screen, int plate, const
     const auto d = screen.grid(x2, y2);
     const double narrowestCell = screen.cell / std::max(1.0, screen.aspect);
     if (narrowestCell < 1.25) {
-        for (int y = window.y1; y < window.y2; ++y) {
-            if (context.cancelled()) {
-                return false;
-            }
+        forEachRow(context, window.y1, window.y2, [&](int y) {
             for (int x = window.x1; x < window.x2; ++x) {
                 const auto value = context.source.read(x, y);
                 storeInk(context.output.pixel(x, y), screen.density(unpremultiply(value), plate));
             }
-        }
-        return true;
+        });
+        return !context.cancelled();
     }
 
     const int left = static_cast<int>(std::floor(std::min({a[0], b[0], c[0], d[0]}) + 0.5));
     const int bottom = static_cast<int>(std::floor(std::min({a[1], b[1], c[1], d[1]}) + 0.5));
     const int columns = 1 + static_cast<int>(std::floor(std::max({a[0], b[0], c[0], d[0]}) + 0.5)) - left;
     const int rows = 1 + static_cast<int>(std::floor(std::max({a[1], b[1], c[1], d[1]}) + 0.5)) - bottom;
-    std::vector<float> densities(static_cast<std::size_t>(columns) * rows, -1.0f);
+    // Every cell's ink is worked out before the pixels are drawn, so the rows
+    // below only read the table and can be drawn from several threads.
+    std::vector<float> densities(static_cast<std::size_t>(columns) * rows);
+    forEachRow(context, 0, rows, [&](int row) {
+        auto* cells = densities.data() + static_cast<std::size_t>(row) * columns;
+        for (int column = 0; column < columns; ++column) {
+            cells[column] = screen.density(screen.cellColor(context.source, left + column, bottom + row), plate);
+        }
+    });
+    if (context.cancelled()) {
+        return false;
+    }
     const float blur = static_cast<float>(std::min(0.30, 0.55 / narrowestCell + 0.16 * screen.softness));
     const float resolve = smooth(static_cast<float>((narrowestCell - 1.25) / 1.25));
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return false;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         for (int x = window.x1; x < window.x2; ++x) {
             const auto position = screen.grid(x, y);
             const int nearestU = static_cast<int>(std::floor(position[0] + 0.5));
             const int nearestV = static_cast<int>(std::floor(position[1] + 0.5));
-            auto& density = densities[static_cast<std::size_t>(nearestV - bottom) * columns + nearestU - left];
-            if (density < 0.0f) {
-                density = screen.density(screen.cellColor(context.source, nearestU, nearestV), plate);
-            }
+            const float density = densities[static_cast<std::size_t>(nearestV - bottom) * columns + nearestU - left];
             const float ink = mark(density, position[0] - nearestU, position[1] - nearestV, blur);
             storeInk(context.output.pixel(x, y), lerp(density, ink, resolve));
         }
-    }
-    return true;
+    });
+    return !context.cancelled();
 }
 
 } // namespace
@@ -349,10 +348,7 @@ void renderVHSDamage(const Context& context, const VHSSettings& settings)
     const int streakGrid = std::max(1, static_cast<int>(std::round(widthScale * 2.0)));
     const double fieldPhase = (timeKey & 1u) == 0 ? 1.0 : -1.0;
 
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         const double row = (static_cast<double>(y) - context.frame.y1) / frameHeight;
         const double scanPosition = row * frameHeight / lineSpacing;
         const int line = static_cast<int>(std::floor(scanPosition));
@@ -407,7 +403,7 @@ void renderVHSDamage(const Context& context, const VHSSettings& settings)
             const float brightness = originalLuma * scanGain * dropoutGain + grain + dropoutLift;
             context.output.pixel(x, y) = blend(original, premultiply(fromLumaChroma(brightness, colorSignal), warped.a), amount);
         }
-    }
+    });
 }
 
 void renderHalfTone(const Context& context, const HalfToneSettings& settings)

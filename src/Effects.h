@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Parallel.h"
 #include "Shake.h"
 
 #include <algorithm>
@@ -119,6 +120,20 @@ struct Context {
 
     bool cancelled() const { return abort && abort(abortContext); }
 };
+
+// Calls row(y) for every y in [begin, end) from several threads and stops
+// early once the host cancels. A row may only write state that belongs to it.
+template <typename Row>
+void forEachRow(const Context& context, int begin, int end, const Row& row) {
+    parallelBands(begin, end, [&](int first, int last) {
+        for (int y = first; y < last; ++y) {
+            if (context.cancelled()) {
+                return;
+            }
+            row(y);
+        }
+    });
+}
 
 struct LensFlareSettings {
     double centerX, centerY, brightness, size, streak, halo, ghosts, rotation;

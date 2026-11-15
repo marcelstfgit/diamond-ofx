@@ -55,14 +55,11 @@ template<class Sample>
 void draw(const Context& context, Image& output, const Sample& sample)
 {
     const Rect window = output.bounds;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         for (int x = window.x1; x < window.x2; ++x) {
             output.pixel(x, y) = sample(x, y);
         }
-    }
+    });
 }
 
 void dissolve(const Context& context, const Image& to, float mix, Image& output)

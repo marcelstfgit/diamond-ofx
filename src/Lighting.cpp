@@ -199,10 +199,7 @@ public:
         const float cutoff = static_cast<float>(threshold);
         const float knee = static_cast<float>(softness);
         const float normalization = 1.0f / std::max(0.15f, 1.0f - cutoff);
-        for (int y = bounds_.y1; y < bounds_.y2; ++y) {
-            if (context.cancelled()) {
-                return false;
-            }
+        forEachRow(context, bounds_.y1, bounds_.y2, [&](int y) {
             for (int x = bounds_.x1; x < bounds_.x2; ++x) {
                 const Pixel pixel = context.source.read(x, y);
                 const float luma = 0.2126f * pixel.r + 0.7152f * pixel.g + 0.0722f * pixel.b;
@@ -210,8 +207,8 @@ public:
                 const float rolloff = knee > 0.0f ? smoothStep(0.0f, knee, excess) : 1.0f;
                 pixels_[index(x, y)] = excess * rolloff * normalization;
             }
-        }
-        return true;
+        });
+        return !context.cancelled();
     }
 
     float sample(double x, double y) const {
@@ -256,17 +253,14 @@ private:
 template <typename Effect>
 void renderLight(const Context& context, bool lightOnly, Color tint, const Effect& effect) {
     const Rect window = context.output.bounds;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         for (int x = window.x1; x < window.x2; ++x) {
             const Pixel base = lightOnly ? Pixel{} : context.source.read(x, y);
             const Color light = effect(x, y);
             context.output.pixel(x, y) = compositeLight(
                 base, {light.r * tint.r, light.g * tint.g, light.b * tint.b});
         }
-    }
+    });
 }
 
 Color gainAndTint(double brightness, double red, double green, double blue) {

@@ -21,6 +21,7 @@ To use a local build, follow the [installation guide](INSTALL.md) with the `Diam
 - `src/EffectControls.cpp` defines effect parameters, defaults, and options.
 - `src/ImageIO.cpp` converts host image buffers and preserves the alpha convention.
 - `src/Effects.h` defines the renderer interface. The other files in `src/` implement the effects.
+- `src/Parallel.cpp` splits a render into bands of rows that run on the system thread pool.
 
 ## Check a change
 

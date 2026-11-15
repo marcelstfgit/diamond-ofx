@@ -247,25 +247,30 @@ void convolve(const Context& context, const Image& source, Image& output, const 
     const auto spans = makeSpans(aperture);
     const int columns = width(source.bounds);
     const int rows = height(source.bounds);
-    RowCache cache(source, highlights, std::min(rows, static_cast<int>(spans.size())));
-    for (int y = output.bounds.y1; y < output.bounds.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
-        for (const Span& span : spans) {
-            const int sourceY = edgeRow(y - source.bounds.y1 + span.y, rows, edge);
-            if (sourceY < 0) {
-                continue;
+    const int cachedRows = std::min(rows, static_cast<int>(spans.size()));
+    // Each band keeps its own row cache. A band rebuilds at most one aperture
+    // height of prefix rows, so bands are kept at least that tall.
+    parallelBands(output.bounds.y1, output.bounds.y2, [&](int firstRow, int lastRow) {
+        RowCache cache(source, highlights, cachedRows);
+        for (int y = firstRow; y < lastRow; ++y) {
+            if (context.cancelled()) {
+                return;
             }
-            const Sum* prefix = cache.get(sourceY);
-            for (int x = output.bounds.x1; x < output.bounds.x2; ++x) {
-                const int localX = x - source.bounds.x1;
-                const Sum left = integral(prefix, columns, localX + span.left, span.leftFraction, edge);
-                const Sum right = integral(prefix, columns, localX + span.right, span.rightFraction, edge);
-                add(output.pixel(x, y), (right - left).pixel(span.weight), 1.0f);
+            for (const Span& span : spans) {
+                const int sourceY = edgeRow(y - source.bounds.y1 + span.y, rows, edge);
+                if (sourceY < 0) {
+                    continue;
+                }
+                const Sum* prefix = cache.get(sourceY);
+                for (int x = output.bounds.x1; x < output.bounds.x2; ++x) {
+                    const int localX = x - source.bounds.x1;
+                    const Sum left = integral(prefix, columns, localX + span.left, span.leftFraction, edge);
+                    const Sum right = integral(prefix, columns, localX + span.right, span.rightFraction, edge);
+                    add(output.pixel(x, y), (right - left).pixel(span.weight), 1.0f);
+                }
             }
         }
-    }
+    }, std::max(8, cachedRows));
 }
 
 struct Split {
@@ -329,10 +334,7 @@ int workingSize(int size, double radius, double budget) {
 
 void composite(const Context& context, float mix, const Image* reduced, double scaleX, double scaleY) {
     const Rect window = context.output.bounds;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (context.cancelled()) {
-            return;
-        }
+    forEachRow(context, window.y1, window.y2, [&](int y) {
         const double sourceY = reducedCoordinate(y, context.source.bounds.y1, scaleY);
         for (int x = window.x1; x < window.x2; ++x) {
             Pixel& output = context.output.pixel(x, y);
@@ -354,7 +356,7 @@ void composite(const Context& context, float mix, const Image* reduced, double s
                 output = mixed;
             }
         }
-    }
+    });
 }
 
 double bounded(double value, double lo, double hi, double fallback) {
@@ -395,7 +397,7 @@ void renderRackDefocus(const Context& context, const DefocusSettings& settings) 
     const int workHeight = workingSize(rows, aperture.yRadius, budget);
     if (workWidth == columns && workHeight == rows) {
         convolve(context, context.source, context.output, aperture, highlights, settings.edge);
-        if (mix < 1) {
+        if (mix < 1 && !context.cancelled()) {
             composite(context, mix, nullptr, 1, 1);
         }
         return;
@@ -416,6 +418,9 @@ void renderRackDefocus(const Context& context, const DefocusSettings& settings) 
                    static_cast<int>(std::floor(lowX(window.x2 - 1))) + 2,
                    static_cast<int>(std::floor(lowY(window.y2 - 1))) + 2});
     convolve(context, reduced, blurred, aperture, Highlights{}, settings.edge);
+    if (context.cancelled()) {
+        return;
+    }
     composite(context, mix, &blurred, scaleX, scaleY);
 }
 

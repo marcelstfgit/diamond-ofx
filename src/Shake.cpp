@@ -1,5 +1,7 @@
 #include "Shake.h"
 
+#include "Parallel.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -223,38 +225,40 @@ void render(ImageView source, MutableImageView destination, Rect frame, Rect win
     }
     const auto windowBytes = static_cast<std::size_t>(
         static_cast<std::ptrdiff_t>(window.x2) - window.x1) * kPixelBytes;
-    for (int y = window.y1; y < window.y2; ++y) {
-        if (abort && abort(abortContext)) {
-            return;
-        }
-        auto* output = static_cast<std::byte*>(destination.data)
-            + (static_cast<std::ptrdiff_t>(y) - destination.bounds.y1) * destination.rowBytes
-            + (static_cast<std::ptrdiff_t>(window.x1) - destination.bounds.x1) * kPixelBytes;
-        if (clear) {
-            std::memset(output, 0, windowBytes);
-            continue;
-        }
-        for (int x = window.x1; x < window.x2; ++x, output += kPixelBytes) {
-            std::array<float, Components> result{};
-            for (int sample = 0; sample < samples; ++sample) {
-                const Transform& t = transforms[sample];
-                addBilinear<Sample, Components, StraightAlpha>(
-                    source, frame, edge, t.xx * x + t.xy * y + t.xOffset,
-                    t.yx * x + t.yy * y + t.yOffset, weight, result);
+    parallelBands(window.y1, window.y2, [&](int firstRow, int lastRow) {
+        for (int y = firstRow; y < lastRow; ++y) {
+            if (abort && abort(abortContext)) {
+                return;
             }
-            if constexpr (StraightAlpha) {
-                // Filter premultiplied RGB through both the bilinear taps and
-                // shutter samples, then restore the host's straight convention.
-                const float alpha = result[3] * alphaScale<Sample>();
-                for (int channel = 0; channel < 3; ++channel) {
-                    result[channel] = alpha != 0.0f ? result[channel] / alpha : 0.0f;
+            auto* output = static_cast<std::byte*>(destination.data)
+                + (static_cast<std::ptrdiff_t>(y) - destination.bounds.y1) * destination.rowBytes
+                + (static_cast<std::ptrdiff_t>(window.x1) - destination.bounds.x1) * kPixelBytes;
+            if (clear) {
+                std::memset(output, 0, windowBytes);
+                continue;
+            }
+            for (int x = window.x1; x < window.x2; ++x, output += kPixelBytes) {
+                std::array<float, Components> result{};
+                for (int sample = 0; sample < samples; ++sample) {
+                    const Transform& t = transforms[sample];
+                    addBilinear<Sample, Components, StraightAlpha>(
+                        source, frame, edge, t.xx * x + t.xy * y + t.xOffset,
+                        t.yx * x + t.yy * y + t.yOffset, weight, result);
+                }
+                if constexpr (StraightAlpha) {
+                    // Filter premultiplied RGB through both the bilinear taps and
+                    // shutter samples, then restore the host's straight convention.
+                    const float alpha = result[3] * alphaScale<Sample>();
+                    for (int channel = 0; channel < 3; ++channel) {
+                        result[channel] = alpha != 0.0f ? result[channel] / alpha : 0.0f;
+                    }
+                }
+                for (int channel = 0; channel < Components; ++channel) {
+                    storeSample<Sample>(output + channel * sizeof(Sample), result[channel]);
                 }
             }
-            for (int channel = 0; channel < Components; ++channel) {
-                storeSample<Sample>(output + channel * sizeof(Sample), result[channel]);
-            }
         }
-    }
+    });
 }
 
 template <typename Sample>
@@ -308,6 +312,11 @@ void renderShake(
         transforms[sample] = makeTransform(frame, timeSeconds + shutterTime * exposure,
                                            pixelAspect, settings);
     }
+
+    // Rows render on several threads, and only this one may ask the host.
+    Cancellation cancellation(abort, abortContext);
+    abort = Cancellation::poll;
+    abortContext = &cancellation;
 
     switch (depth) {
         case Depth::Byte:
