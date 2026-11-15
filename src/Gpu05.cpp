@@ -5,12 +5,15 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace diamond::fx {
 namespace {
@@ -47,10 +50,13 @@ constexpr ClFlags kClWriteOnly = 1ULL << 1;
 constexpr ClFlags kClReadOnly = 1ULL << 2;
 constexpr ClFlags kClCopyHostPtr = 1ULL << 5;
 constexpr ClProp kClContextPlatform = 0x1084;
+constexpr ClUint kClDeviceGlobalMemSize = 0x101F;
+constexpr ClUint kClDeviceHostUnifiedMemory = 0x1035;
 
 struct OpenCl {
     ClInt (WINAPI* getPlatforms)(ClUint, ClPlatform*, ClUint*) = nullptr;
     ClInt (WINAPI* getDevices)(ClPlatform, ClFlags, ClUint, ClDevice*, ClUint*) = nullptr;
+    ClInt (WINAPI* getDeviceInfo)(ClDevice, ClUint, std::size_t, void*, std::size_t*) = nullptr;
     ClContext (WINAPI* createContext)(const ClProp*, ClUint, const ClDevice*, ClContextCallback,
                                      void*, ClInt*) = nullptr;
     ClInt (WINAPI* releaseContext)(ClContext) = nullptr;
@@ -81,6 +87,7 @@ struct OpenCl {
     bool load(HMODULE library) {
         return bind(library, "clGetPlatformIDs", getPlatforms)
             && bind(library, "clGetDeviceIDs", getDevices)
+            && bind(library, "clGetDeviceInfo", getDeviceInfo)
             && bind(library, "clCreateContext", createContext)
             && bind(library, "clReleaseContext", releaseContext)
             && bind(library, "clCreateCommandQueue", createQueue)
@@ -191,17 +198,45 @@ public:
         if (cl_.getPlatforms(count, platforms.data(), nullptr) != kClSuccess) {
             return;
         }
+        struct Candidate {
+            ClPlatform platform;
+            ClDevice device;
+            bool dedicated;
+            std::uint64_t memory;
+        };
+        std::vector<Candidate> candidates;
         for (const auto platform : platforms) {
-            ClDevice device = nullptr;
-            if (cl_.getDevices(platform, kClDeviceGpu, 1, &device, nullptr) != kClSuccess) {
+            std::array<ClDevice, 8> devices{};
+            ClUint found = 0;
+            if (cl_.getDevices(platform, kClDeviceGpu, static_cast<ClUint>(devices.size()),
+                               devices.data(), &found) != kClSuccess) {
                 continue;
             }
-            const ClProp properties[]{kClContextPlatform, reinterpret_cast<ClProp>(platform), 0};
+            found = std::min(found, static_cast<ClUint>(devices.size()));
+            for (ClUint index = 0; index < found; ++index) {
+                // A device that cannot answer is ranked with the integrated ones.
+                ClUint sharesHostMemory = kClTrue;
+                std::uint64_t memory = 0;
+                cl_.getDeviceInfo(devices[index], kClDeviceHostUnifiedMemory, sizeof(sharesHostMemory),
+                                  &sharesHostMemory, nullptr);
+                cl_.getDeviceInfo(devices[index], kClDeviceGlobalMemSize, sizeof(memory), &memory, nullptr);
+                candidates.push_back({platform, devices[index], sharesHostMemory == 0, memory});
+            }
+        }
+        // Laptops report an integrated GPU next to the dedicated card, in an
+        // order set by the installed drivers. Prefer a card with its own memory,
+        // then the one with more of it. Integrated GPUs report shared system
+        // memory, so their size only decides between two devices of one kind.
+        std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+            return a.dedicated != b.dedicated ? a.dedicated : a.memory > b.memory;
+        });
+        for (const Candidate& candidate : candidates) {
+            const ClProp properties[]{kClContextPlatform, reinterpret_cast<ClProp>(candidate.platform), 0};
             ClInt error = 0;
-            const auto context = cl_.createContext(properties, 1, &device, nullptr, nullptr, &error);
+            const auto context = cl_.createContext(properties, 1, &candidate.device, nullptr, nullptr, &error);
             if (context && error == kClSuccess) {
                 context_ = context;
-                device_ = device;
+                device_ = candidate.device;
                 break;
             }
             if (context) {

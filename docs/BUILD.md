@@ -22,6 +22,7 @@ To use a local build, follow the [installation guide](INSTALL.md) with the `Diam
 - `src/ImageIO.cpp` converts host image buffers and preserves the alpha convention.
 - `src/Effects.h` defines the renderer interface. The other files in `src/` implement the effects.
 - `src/Parallel.cpp` splits a render into bands of rows that run on the system thread pool.
+- `src/Gpu05.cpp` runs the OpenCL effects and picks the dedicated GPU when a machine has more than one.
 
 ## Check a change
 
