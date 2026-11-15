@@ -21,3 +21,23 @@ To use a local build, follow the [installation guide](INSTALL.md) with the `Diam
 - `src/EffectControls.cpp` defines effect parameters, defaults, and options.
 - `src/ImageIO.cpp` converts host image buffers and preserves the alpha convention.
 - `src/Effects.h` defines the renderer interface. The other files in `src/` implement the effects.
+
+## Check a change
+
+`tests/Harness.cpp` is a small OpenFX host. It renders every effect on synthetic frames without a video editor and prints a hash of the output and the render time for each case. It fails when a render returns an error or when the plug-in calls the host from a thread other than the render thread.
+
+Build it, then record the results of the bundle you are starting from.
+
+```bat
+.\tests\build.cmd
+.\build\tests\Harness.exe build\Diamond.ofx.bundle\Contents\Win64\Diamond.ofx --write before.tsv
+```
+
+Rebuild the bundle with your change and compare. A change that should leave the picture alone must report zero different renders.
+
+```bat
+.\build.cmd
+.\build\tests\Harness.exe build\Diamond.ofx.bundle\Contents\Win64\Diamond.ofx --compare before.tsv
+```
+
+Use `--size 1920x1080 --repeat 3` to measure render times, `--only D_Glow` to run one effect, `--pictures <folder>` to save the 8-bit results as PPM files, and `--cancel-after <polls>` to make the host cancel each render partway through.
